@@ -1,6 +1,6 @@
 // ============================================
 // VOICE-BASED AI MOCK INTERVIEW PLATFORM
-// Backend Server - FINAL WORKING VERSION
+// FINAL PRODUCTION BACKEND
 // ============================================
 
 const express = require("express");
@@ -16,14 +16,9 @@ const PORT = process.env.PORT || 10000;
 // MIDDLEWARE
 // ============================================
 
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "*",
-    credentials: true,
-  })
-);
+app.use(cors({ origin: "*", credentials: true }));
 
-// ✅ Important: allow large webhook payloads
+// Allow large webhook payloads from Retell
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
@@ -51,7 +46,7 @@ if (!RETELL_API_KEY || !RETELL_AGENT_ID || !OPENROUTER_API_KEY) {
 // ============================================
 
 app.get("/", (req, res) => {
-  res.json({ status: "Backend running" });
+  res.json({ status: "Mock Interview Backend Running" });
 });
 
 // ============================================
@@ -95,14 +90,14 @@ app.post("/create-interview", async (req, res) => {
 });
 
 // ============================================
-// RETELL WEBHOOK (FINAL FIX)
+// RETELL WEBHOOK (FINAL + SAFE)
 // ============================================
 
 app.post("/retell/interview-complete", async (req, res) => {
   try {
     console.log("📩 Retell webhook received");
 
-    // Ignore non-final events
+    // Only handle final event
     if (req.body.event !== "call_ended") {
       console.log("⏭️ Ignored event:", req.body.event);
       return res.status(200).json({ ignored: true });
@@ -111,7 +106,6 @@ app.post("/retell/interview-complete", async (req, res) => {
     const jobRole = req.body.metadata?.jobRole || "Software Engineer";
     const callId = req.body.call?.call_id || null;
 
-    // ✅ Correct transcript extraction
     const transcript =
       req.body.call?.transcript ||
       req.body.call?.transcript_text ||
@@ -124,11 +118,9 @@ app.post("/retell/interview-complete", async (req, res) => {
 
     console.log("🎙️ Interview ended for:", jobRole);
 
-    // Generate feedback
     const feedback = await generateFeedback(transcript, jobRole);
     console.log("🧠 Feedback generated");
 
-    // Store in Firebase
     const docRef = await db.collection("interviews").add({
       jobRole,
       transcript,
@@ -147,22 +139,53 @@ app.post("/retell/interview-complete", async (req, res) => {
 });
 
 // ============================================
-// OPENROUTER FEEDBACK GENERATION
+// FETCH LATEST FEEDBACK (FOR FRONTEND)
+// ============================================
+
+app.get("/interviews/latest", async (req, res) => {
+  try {
+    const snapshot = await db
+      .collection("interviews")
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ success: true, feedback: null });
+    }
+
+    const data = snapshot.docs[0].data();
+
+    res.json({
+      success: true,
+      jobRole: data.jobRole,
+      feedback: data.feedback,
+      createdAt: data.createdAt,
+    });
+  } catch (err) {
+    console.error("❌ Fetch feedback error:", err.message);
+    res.status(500).json({ error: "Failed to fetch feedback" });
+  }
+});
+
+// ============================================
+// OPENROUTER FEEDBACK GENERATOR
 // ============================================
 
 async function generateFeedback(transcript, jobRole) {
   const prompt = `
-You are an experienced interviewer.
+You are a professional interviewer.
 
-Analyze the interview for the role of ${jobRole}.
+Evaluate the completed interview for the role of ${jobRole}.
 
 Provide:
 - Strengths
 - Weaknesses
 - Communication
 - Problem-solving
-- Improvements
-- Suggestions
+- Areas to improve
+- Practical suggestions
+- Overall summary
 - Final score out of 10
 
 Transcript:
@@ -176,7 +199,7 @@ ${transcript}
       max_tokens: 600,
       temperature: 0.7,
       messages: [
-        { role: "system", content: "You are a professional interview evaluator." },
+        { role: "system", content: "You are an interview evaluator." },
         { role: "user", content: prompt },
       ],
     },
