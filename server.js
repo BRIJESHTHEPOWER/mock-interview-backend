@@ -1,6 +1,6 @@
 // ============================================
 // VOICE-BASED AI MOCK INTERVIEW PLATFORM
-// Backend Server - Node.js + Express (FIXED)
+// Backend Server - FINAL WORKING VERSION
 // ============================================
 
 const express = require("express");
@@ -10,24 +10,24 @@ require("dotenv").config();
 const { db } = require("./firebase");
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 10000;
 
 // ============================================
-// MIDDLEWARE (FIXED PAYLOAD LIMIT)
+// MIDDLEWARE
 // ============================================
 
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin: process.env.FRONTEND_URL || "*",
     credentials: true,
   })
 );
 
-// ✅ FIX: Allow large Retell webhook payload
+// ✅ Important: allow large webhook payloads
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ limit: "10mb", extended: true }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// Request logger
+// Logger
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -41,13 +41,8 @@ const RETELL_API_KEY = process.env.RETELL_API_KEY;
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-if (!RETELL_API_KEY || !RETELL_AGENT_ID) {
-  console.error("❌ Missing RETELL_API_KEY or RETELL_AGENT_ID");
-  process.exit(1);
-}
-
-if (!OPENROUTER_API_KEY) {
-  console.error("❌ Missing OPENROUTER_API_KEY");
+if (!RETELL_API_KEY || !RETELL_AGENT_ID || !OPENROUTER_API_KEY) {
+  console.error("❌ Missing required environment variables");
   process.exit(1);
 }
 
@@ -55,12 +50,8 @@ if (!OPENROUTER_API_KEY) {
 // HEALTH CHECK
 // ============================================
 
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    message: "Mock Interview Backend Running",
-    time: new Date().toISOString(),
-  });
+app.get("/", (req, res) => {
+  res.json({ status: "Backend running" });
 });
 
 // ============================================
@@ -71,11 +62,8 @@ app.post("/create-interview", async (req, res) => {
   try {
     const { jobRole } = req.body;
 
-    if (!jobRole || typeof jobRole !== "string") {
-      return res.status(400).json({
-        success: false,
-        error: "jobRole is required",
-      });
+    if (!jobRole) {
+      return res.status(400).json({ error: "jobRole required" });
     }
 
     const response = await axios.post(
@@ -83,10 +71,9 @@ app.post("/create-interview", async (req, res) => {
       {
         agent_id: RETELL_AGENT_ID,
         retell_llm_dynamic_variables: {
-          job_role: jobRole.trim(),
-          candidate_name: "Candidate",
+          job_role: jobRole,
         },
-        metadata: { jobRole: jobRole.trim() },
+        metadata: { jobRole },
       },
       {
         headers: {
@@ -100,78 +87,74 @@ app.post("/create-interview", async (req, res) => {
       success: true,
       callId: response.data.call_id,
       accessToken: response.data.access_token,
-      agentId: RETELL_AGENT_ID,
     });
   } catch (err) {
-    console.error("❌ Retell Error:", err.response?.data || err.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to create interview",
-    });
+    console.error("❌ Create interview error:", err.message);
+    res.status(500).json({ error: "Failed to create interview" });
   }
 });
 
 // ============================================
-// RETELL INTERVIEW COMPLETED WEBHOOK (FIXED)
+// RETELL WEBHOOK (FINAL FIX)
 // ============================================
 
 app.post("/retell/interview-complete", async (req, res) => {
   try {
     console.log("📩 Retell webhook received");
 
-    const metadata = req.body.metadata || {};
-    const jobRole = metadata.jobRole || "Software Engineer";
-    const callId = req.body.call_id || null;
+    // Ignore non-final events
+    if (req.body.event !== "call_ended") {
+      console.log("⏭️ Ignored event:", req.body.event);
+      return res.status(200).json({ ignored: true });
+    }
 
-    // ✅ FIX: Correct transcript extraction
+    const jobRole = req.body.metadata?.jobRole || "Software Engineer";
+    const callId = req.body.call?.call_id || null;
+
+    // ✅ Correct transcript extraction
     const transcript =
-      req.body.transcript_object?.transcript ||
-      req.body.transcript ||
+      req.body.call?.transcript ||
+      req.body.call?.transcript_text ||
       null;
 
     if (!transcript) {
-      console.error("❌ Transcript missing in webhook payload");
+      console.error("❌ Transcript missing after call ended");
       return res.status(400).json({ error: "Transcript missing" });
     }
 
-    console.log("🎙️ Interview completed for:", jobRole);
+    console.log("🎙️ Interview ended for:", jobRole);
 
-    // Generate AI feedback
+    // Generate feedback
     const feedback = await generateFeedback(transcript, jobRole);
     console.log("🧠 Feedback generated");
 
-    // Store in Firestore
-    const interviewData = {
-      userId: req.body.user_id || "anonymous",
+    // Store in Firebase
+    const docRef = await db.collection("interviews").add({
       jobRole,
       transcript,
       feedback,
       callId,
       createdAt: new Date(),
-    };
+    });
 
-    const docRef = await db.collection("interviews").add(interviewData);
     console.log("✅ Stored in Firestore:", docRef.id);
 
-    res.status(200).json({
-      success: true,
-      interviewId: docRef.id,
-    });
+    res.status(200).json({ success: true });
   } catch (err) {
-    console.error("❌ Webhook Error:", err.message);
-    res.status(500).json({ error: "Webhook processing failed" });
+    console.error("❌ Webhook error:", err.message);
+    res.status(500).json({ error: "Webhook failed" });
   }
 });
 
 // ============================================
-// OPENROUTER FEEDBACK GENERATOR (HARDENED)
+// OPENROUTER FEEDBACK GENERATION
 // ============================================
 
 async function generateFeedback(transcript, jobRole) {
   const prompt = `
-You are an experienced interviewer and career coach.
+You are an experienced interviewer.
 
-Evaluate the completed interview for the role of ${jobRole}.
+Analyze the interview for the role of ${jobRole}.
 
 Provide:
 - Strengths
@@ -179,8 +162,7 @@ Provide:
 - Communication
 - Problem-solving
 - Improvements
-- Practical suggestions
-- Overall summary
+- Suggestions
 - Final score out of 10
 
 Transcript:
@@ -209,25 +191,6 @@ ${transcript}
 
   return response.data.choices[0].message.content;
 }
-
-// ============================================
-// 404 + GLOBAL ERROR
-// ============================================
-
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: "Endpoint not found",
-  });
-});
-
-app.use((err, req, res, next) => {
-  console.error("Unhandled Error:", err);
-  res.status(500).json({
-    success: false,
-    error: "Internal server error",
-  });
-});
 
 // ============================================
 // START SERVER
