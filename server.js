@@ -7,12 +7,13 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 require("dotenv").config();
+const { db } = require("./firebase");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ============================================
-// MIDDLEWARE
+// MIDDLEWARE (FIXED PAYLOAD LIMIT)
 // ============================================
 
 app.use(
@@ -22,7 +23,9 @@ app.use(
   })
 );
 
-app.use(express.json());
+// ✅ FIX: Allow large Retell webhook payload
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 // Request logger
 app.use((req, res, next) => {
@@ -109,62 +112,78 @@ app.post("/create-interview", async (req, res) => {
 });
 
 // ============================================
-// RETELL INTERVIEW COMPLETED WEBHOOK
+// RETELL INTERVIEW COMPLETED WEBHOOK (FIXED)
 // ============================================
 
 app.post("/retell/interview-complete", async (req, res) => {
   try {
-    const { transcript, metadata } = req.body;
-    const jobRole = metadata?.jobRole || "Software Engineer";
+    console.log("📩 Retell webhook received");
+
+    const metadata = req.body.metadata || {};
+    const jobRole = metadata.jobRole || "Software Engineer";
+    const callId = req.body.call_id || null;
+
+    // ✅ FIX: Correct transcript extraction
+    const transcript =
+      req.body.transcript_object?.transcript ||
+      req.body.transcript ||
+      null;
 
     if (!transcript) {
-      return res.status(400).json({
-        success: false,
-        error: "Transcript missing",
-      });
+      console.error("❌ Transcript missing in webhook payload");
+      return res.status(400).json({ error: "Transcript missing" });
     }
 
     console.log("🎙️ Interview completed for:", jobRole);
 
+    // Generate AI feedback
     const feedback = await generateFeedback(transcript, jobRole);
+    console.log("🧠 Feedback generated");
 
-    // For now just log (later store in Firebase)
-    console.log("🧠 FEEDBACK RESULT:\n", feedback);
+    // Store in Firestore
+    const interviewData = {
+      userId: req.body.user_id || "anonymous",
+      jobRole,
+      transcript,
+      feedback,
+      callId,
+      createdAt: new Date(),
+    };
 
-    res.json({
+    const docRef = await db.collection("interviews").add(interviewData);
+    console.log("✅ Stored in Firestore:", docRef.id);
+
+    res.status(200).json({
       success: true,
-      message: "Feedback generated successfully",
+      interviewId: docRef.id,
     });
   } catch (err) {
-    console.error("❌ Feedback Generation Error:", err.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to generate feedback",
-    });
+    console.error("❌ Webhook Error:", err.message);
+    res.status(500).json({ error: "Webhook processing failed" });
   }
 });
 
 // ============================================
-// OPENROUTER FEEDBACK GENERATOR
+// OPENROUTER FEEDBACK GENERATOR (HARDENED)
 // ============================================
 
 async function generateFeedback(transcript, jobRole) {
   const prompt = `
-You are an experienced interviewer and career coach specializing in hiring for the role of ${jobRole}.
+You are an experienced interviewer and career coach.
 
-Analyze the following completed voice-based mock interview transcript and generate structured feedback.
+Evaluate the completed interview for the role of ${jobRole}.
 
-Evaluate the candidate on:
-1. Role-specific strengths
-2. Role-specific weaknesses
-3. Communication skills
-4. Problem-solving ability
-5. Areas to improve
-6. Practical suggestions
-7. Overall summary
-8. Final score out of 10
+Provide:
+- Strengths
+- Weaknesses
+- Communication
+- Problem-solving
+- Improvements
+- Practical suggestions
+- Overall summary
+- Final score out of 10
 
-Interview Transcript:
+Transcript:
 ${transcript}
 `;
 
@@ -172,15 +191,11 @@ ${transcript}
     "https://openrouter.ai/api/v1/chat/completions",
     {
       model: "meta-llama/llama-3.3-70b-instruct:free",
+      max_tokens: 600,
+      temperature: 0.7,
       messages: [
-        {
-          role: "system",
-          content: "You are a professional interview evaluator.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
+        { role: "system", content: "You are a professional interview evaluator." },
+        { role: "user", content: prompt },
       ],
     },
     {
@@ -188,6 +203,7 @@ ${transcript}
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
       },
+      timeout: 30000,
     }
   );
 
@@ -220,7 +236,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log("=".repeat(50));
   console.log("🚀 Mock Interview Backend Started");
-  console.log(`📡 Server: http://localhost:${PORT}`);
   console.log(`🎙️ Retell Agent: ${RETELL_AGENT_ID}`);
   console.log("=".repeat(50));
 });
