@@ -82,6 +82,13 @@ app.post("/create-interview", async (req, res) => {
 });
 
 // ============================================
+// CHATBOT API ROUTE
+// ============================================
+
+const chatbotRouter = require('./routes/chatbot');
+app.use('/api/chatbot', chatbotRouter);
+
+// ============================================
 // RETELL WEBHOOK (COMPLETELY REWRITTEN)
 // ============================================
 
@@ -102,12 +109,12 @@ app.post("/retell/interview-complete", async (req, res) => {
     transcript = callData.transcript || callData.transcript_text || "";
     callId = callData.call_id || callData.callId || `call_${Date.now()}`;
 
-    // Try to get jobRole from retell_llm_dynamic_variables or metadata
+    // Try to get jobRole from multiple sources (supports both Retell webhook and internal calls)
     const dynamicVars = callData.retell_llm_dynamic_variables || {};
-    jobRole = dynamicVars.job_role || callData.job_role || "Software Engineer";
+    jobRole = payload.jobRole || callData.jobRole || dynamicVars.job_role || callData.job_role || "Frontend Developer";
 
     // Get userId if available (we'll need to match with existing interview record)
-    userId = callData.userId || null;
+    userId = payload.userId || callData.userId || null;
 
     // Get call duration and start time if available
     duration = callData.call_duration || callData.duration || 0;
@@ -196,8 +203,15 @@ app.post("/process-interview", async (req, res) => {
     }
 
     console.log(`📞 Processing interview for callId: ${callId}`);
+    console.log(`👤 User ID: ${userId}`);
+    console.log(`💼 Job Role: ${jobRole}`);
+
+    // Add a small delay to allow Retell to process the transcript
+    console.log('⏳ Waiting 3 seconds for Retell to process transcript...');
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Fetch transcript from Retell
+    console.log('🔄 Fetching transcript from Retell...');
     const retellResponse = await axios.get(
       `https://api.retellai.com/v2/get-call/${callId}`,
       {
@@ -207,37 +221,47 @@ app.post("/process-interview", async (req, res) => {
       }
     );
 
+    console.log('📦 Retell Response Status:', retellResponse.status);
     const transcript = retellResponse.data.transcript || retellResponse.data.transcript_text;
 
     if (!transcript || transcript.trim().length < 10) {
+      console.warn('⚠️ Transcript too short or unavailable');
+      console.log('Transcript length:', transcript ? transcript.length : 0);
       return res.json({
         success: false,
         message: "Transcript too short or unavailable"
       });
     }
 
+    console.log(`✅ Transcript fetched successfully (${transcript.length} chars)`);
+
     // Trigger webhook processing
     const webhookPayload = {
       transcript,
       callId,
       userId,
-      jobRole: jobRole || "Software Engineer",
+      jobRole: jobRole || "Frontend Developer",
     };
 
+    console.log('🔄 Triggering internal webhook processing...');
     // Process via webhook internally
-    await axios.post(
+    const webhookResponse = await axios.post(
       `http://localhost:${PORT}/retell/interview-complete`,
       webhookPayload
     );
 
+    console.log('✅ Webhook processing completed:', webhookResponse.data);
+
     res.json({
       success: true,
-      message: "Interview processing started"
+      message: "Interview processing started",
+      interviewId: webhookResponse.data.interviewId
     });
 
   } catch (err) {
     console.error("❌ Process interview error:", err.message);
-    res.status(500).json({ error: "Failed to process interview" });
+    console.error("Error details:", err.response?.data || err);
+    res.status(500).json({ error: "Failed to process interview", details: err.message });
   }
 });
 
