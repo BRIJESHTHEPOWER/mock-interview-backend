@@ -5,7 +5,7 @@
 
 const axios = require("axios");
 
-const BACKEND_URL = "http://localhost:5000";
+const BACKEND_URL = "http://localhost:10000";
 
 async function testInterviewComplete() {
     console.log("🧪 Testing Interview Complete Webhook with Firebase Storage\n");
