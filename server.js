@@ -287,6 +287,7 @@ app.get("/interviews/latest", async (req, res) => {
       success: true,
       jobRole: data.jobRole,
       feedback: data.feedback,
+      duration: data.duration, // Include duration
       createdAt: data.createdAt,
     });
   } catch (err) {
