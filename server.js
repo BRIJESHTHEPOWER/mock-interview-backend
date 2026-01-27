@@ -10,20 +10,7 @@ require("dotenv").config();
 const { db } = require("./firebase");
 
 const app = express();
-const PORT = process.env.PORT || 10000;
-
-// ============================================
-// MIDDLEWARE
-// ============================================
-
-app.use(cors({ origin: "*", credentials: true }));
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-  next();
-});
+const PORT = process.env.PORT || 5000;
 
 // ============================================
 // ENV VALIDATION
@@ -32,11 +19,36 @@ app.use((req, res, next) => {
 const RETELL_API_KEY = process.env.RETELL_API_KEY;
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 if (!RETELL_API_KEY || !RETELL_AGENT_ID || !OPENROUTER_API_KEY) {
   console.error("❌ Missing required environment variables");
   process.exit(1);
 }
+
+// ============================================
+// MIDDLEWARE
+// ============================================
+
+app.use(cors({
+  origin: [
+    FRONTEND_URL,
+    'http://localhost:5173',
+    'http://localhost:5000',
+    'https://mock-interview-frontend-0e2x.onrender.com'
+  ],
+  credentials: true
+}));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+
 
 // ============================================
 // HEALTH CHECK
@@ -246,7 +258,7 @@ app.post("/process-interview", async (req, res) => {
     console.log('🔄 Triggering internal webhook processing...');
     // Process via webhook internally
     const webhookResponse = await axios.post(
-      `http://localhost:${PORT}/retell/interview-complete`,
+      `${BACKEND_URL}/retell/interview-complete`,
       webhookPayload
     );
 
