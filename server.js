@@ -98,7 +98,10 @@ app.post("/create-interview", async (req, res) => {
 // ============================================
 
 const chatbotRouter = require('./routes/chatbot');
+const authRouter = require('./routes/auth');
+
 app.use('/api/chatbot', chatbotRouter);
+app.use('/api/auth', authRouter);
 
 // ============================================
 // RETELL WEBHOOK (COMPLETELY REWRITTEN)
@@ -335,7 +338,7 @@ ${transcript}
   const response = await axios.post(
     "https://openrouter.ai/api/v1/chat/completions",
     {
-      model: "meta-llama/llama-3.3-70b-instruct:free",
+      model: "tngtech/deepseek-r1t2-chimera:free",
       temperature: 0.7,
       max_tokens: 600,
       messages: [
@@ -351,6 +354,15 @@ ${transcript}
       timeout: 30000,
     }
   );
+
+  // Log the full response for debugging
+  console.log('OpenRouter Feedback Response Status:', response.status);
+  // console.log('OpenRouter Feedback Response Data:', JSON.stringify(response.data, null, 2)); // Optional: uncomment if needed
+
+  if (!response.data || !response.data.choices || !response.data.choices.length) {
+    console.error('❌ Unexpected OpenRouter feedback response structure:', response.data);
+    return "Feedback generation failed due to AI provider error.";
+  }
 
   return response.data.choices[0].message.content;
 }
