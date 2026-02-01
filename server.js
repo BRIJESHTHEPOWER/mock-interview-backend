@@ -98,10 +98,8 @@ app.post("/create-interview", async (req, res) => {
 // ============================================
 
 const chatbotRouter = require('./routes/chatbot');
-const authRouter = require('./routes/auth');
 
 app.use('/api/chatbot', chatbotRouter);
-app.use('/api/auth', authRouter);
 
 // ============================================
 // RETELL WEBHOOK (COMPLETELY REWRITTEN)
@@ -249,12 +247,15 @@ app.post("/process-interview", async (req, res) => {
     }
 
     console.log(`✅ Transcript fetched successfully (${transcript.length} chars)`);
+    const duration = retellResponse.data.duration_ms ? Math.round(retellResponse.data.duration_ms / 1000) : (retellResponse.data.call_duration || 0);
+    console.log(`⏱️ Duration from Retell: ${duration}s`);
 
     // Trigger webhook processing
     const webhookPayload = {
       transcript,
       callId,
       userId,
+      duration,
       jobRole: jobRole || "Frontend Developer",
     };
 
