@@ -1,15 +1,14 @@
 // ============================================
 // CHATBOT API ROUTE
 // ============================================
-// Handles AI chat requests using OpenRouter API
+// Handles AI chat requests using Groq SDK
 
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
+const Groq = require('groq-sdk');
 
-// OpenRouter API configuration
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+// Initialize Groq client
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // System prompt for the AI assistant
 const SYSTEM_PROMPT = `You are a professional mock interview and technical mentor. Your goal is to help users prepare for job interviews and master coding concepts.
@@ -32,20 +31,27 @@ YOUR ROLE:
 
 // POST /api/chatbot/message
 router.post('/message', async (req, res) => {
+    console.log('🤖 Chatbot request received');
+    console.log('Request body:', req.body);
+
     try {
         const { message, conversationHistory = [] } = req.body;
 
         if (!message || typeof message !== 'string') {
+            console.log('❌ Invalid message:', message);
             return res.status(400).json({
                 error: 'Message is required and must be a string'
             });
         }
 
-        if (!OPENROUTER_API_KEY) {
+        if (!process.env.GROQ_API_KEY) {
+            console.log('❌ Groq API key not found in environment');
             return res.status(500).json({
-                error: 'OpenRouter API key not configured'
+                error: 'Groq API key not configured'
             });
         }
+
+        console.log('✅ Groq API key is configured');
 
         // Build messages array with system prompt and conversation history
         const messages = [
@@ -54,37 +60,24 @@ router.post('/message', async (req, res) => {
             { role: 'user', content: message }
         ];
 
-        // Call OpenRouter API
-        const response = await axios.post(
-            OPENROUTER_API_URL,
-            {
-                model: 'tngtech/deepseek-r1t2-chimera:free',
-                messages: messages,
-                temperature: 0.7,
-                max_tokens: 1000
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                    'HTTP-Referer': 'http://localhost:5173', // Your app URL
-                    'X-Title': 'Interview Prep Assistant',
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
+        // Call Groq API
+        const chatCompletion = await groq.chat.completions.create({
+            messages: messages,
+            model: 'llama-3.3-70b-versatile', // Fast, high-quality Groq model
+            temperature: 0.7,
+            max_tokens: 1000
+        });
 
-        // Log the full response for debugging
-        console.log('OpenRouter Response Status:', response.status);
-        console.log('OpenRouter Response Data:', JSON.stringify(response.data, null, 2));
+        console.log('✅ Groq chatbot response generated');
 
-        if (!response.data || !response.data.choices || !response.data.choices.length) {
-            console.error('❌ Unexpected OpenRouter response structure:', response.data);
+        const aiResponse = chatCompletion.choices[0]?.message?.content;
+
+        if (!aiResponse) {
+            console.error('❌ No response from Groq');
             return res.status(502).json({
                 error: 'Invalid response from AI provider. Please try again.'
             });
         }
-
-        const aiResponse = response.data.choices[0].message.content;
 
         res.json({
             response: aiResponse,
@@ -92,15 +85,15 @@ router.post('/message', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('OpenRouter API Error:', error.response?.data || error.message);
+        console.error('Groq API Error:', error.message);
 
-        if (error.response?.status === 401) {
+        if (error.status === 401) {
             return res.status(401).json({
-                error: 'Invalid OpenRouter API key'
+                error: 'Invalid Groq API key'
             });
         }
 
-        if (error.response?.status === 429) {
+        if (error.status === 429) {
             return res.status(429).json({
                 error: 'Rate limit exceeded. Please try again later.'
             });

@@ -6,6 +6,7 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
+const Groq = require("groq-sdk");
 require("dotenv").config();
 const { db } = require("./firebase");
 
@@ -18,14 +19,17 @@ const PORT = process.env.PORT || 5000;
 
 const RETELL_API_KEY = process.env.RETELL_API_KEY;
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-if (!RETELL_API_KEY || !RETELL_AGENT_ID || !OPENROUTER_API_KEY) {
+if (!RETELL_API_KEY || !RETELL_AGENT_ID || !GROQ_API_KEY) {
   console.error("❌ Missing required environment variables");
   process.exit(1);
 }
+
+// Initialize Groq client
+const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 // ============================================
 // MIDDLEWARE
@@ -82,6 +86,16 @@ app.post("/create-interview", async (req, res) => {
       }
     );
 
+    // [NEW] Save initial interview state to Firestore to track "Live" status
+    const callId = response.data.call_id;
+    await db.collection("interviews").add({
+      callId: callId,
+      jobRole: jobRole,
+      userId: req.body.userId, // Save userId from request
+      status: "started", // Marks it as live
+      createdAt: new Date(),
+    });
+
     res.json({
       success: true,
       callId: response.data.call_id,
@@ -97,63 +111,113 @@ app.post("/create-interview", async (req, res) => {
 // CHATBOT API ROUTE
 // ============================================
 
-const chatbotRouter = require('./routes/chatbot');
+// ============================================
+// CHATBOT API ROUTE
+// ============================================
 
+const chatbotRouter = require('./routes/chatbot');
 app.use('/api/chatbot', chatbotRouter);
+
+// Feedback Submission Route (Public/Authenticated)
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const { userId, rating, message, category } = req.body;
+    // Basic validation
+    if (!rating || !message) {
+      return res.status(400).json({ error: 'Rating and message are required' });
+    }
+
+    const feedbackData = {
+      userId: userId || 'anonymous',
+      rating: Number(rating),
+      message,
+      category: category || 'General',
+      createdAt: new Date(),
+      status: 'new' // new, read, archived
+    };
+
+    await db.collection('platform_feedback').add(feedbackData);
+    res.json({ success: true, message: 'Feedback received' });
+  } catch (error) {
+    console.error("Feedback Error:", error);
+    res.status(500).json({ error: 'Failed to save feedback' });
+  }
+});
+
+const adminRouter = require('./routes/admin');
+app.use('/api/admin', adminRouter);
+
+// ============================================
+// NEWSLETTER SUBSCRIPTION
+// ============================================
+app.post('/api/subscribe', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required" });
+
+    // Check if already subscribed
+    const existing = await db.collection('newsletter_subscribers').doc(email).get();
+    if (existing.exists) {
+      return res.json({ success: true, message: "Already subscribed" });
+    }
+
+    await db.collection('newsletter_subscribers').doc(email).set({
+      email,
+      subscribedAt: new Date(),
+      source: 'footer'
+    });
+
+    res.json({ success: true, message: "Subscribed successfully" });
+  } catch (error) {
+    console.error("Subscription Error:", error);
+    res.status(500).json({ error: "Failed to subscribe" });
+  }
+});
 
 // ============================================
 // RETELL WEBHOOK (COMPLETELY REWRITTEN)
 // ============================================
 
-app.post("/retell/interview-complete", async (req, res) => {
-  console.log("📩 Retell webhook received");
-  console.log("📦 Full Payload:", JSON.stringify(req.body, null, 2));
-
+// Shared function to process interview data (to avoid HTTP round-trips)
+async function processInterviewData(payload) {
   try {
-    const payload = req.body;
+    console.log("� Processing Interview Data Internal...");
 
-    // ✅ HANDLE RETELL AI WEBHOOK FORMAT
-    // Retell sends: { event: "call_ended", call: { call_id, transcript, ... } }
     let transcript, jobRole, callId, userId, duration, startedAt;
 
-    // Extract from Retell webhook structure
+    // Extract from payload (supports both Retell webhook and manual structure)
     const callData = payload.call || payload;
 
     transcript = callData.transcript || callData.transcript_text || "";
     callId = callData.call_id || callData.callId || `call_${Date.now()}`;
+    userId = payload.userId || callData.userId || null;
 
-    // Try to get jobRole from multiple sources (supports both Retell webhook and internal calls)
     const dynamicVars = callData.retell_llm_dynamic_variables || {};
     jobRole = payload.jobRole || callData.jobRole || dynamicVars.job_role || callData.job_role || "Frontend Developer";
 
-    // Get userId if available (we'll need to match with existing interview record)
-    userId = payload.userId || callData.userId || null;
-
-    // Get call duration and start time if available
-    duration = callData.call_duration || callData.duration || 0;
+    // Extract duration - Retell returns it in seconds
+    duration = callData.call_duration || callData.duration || callData.end_timestamp - callData.start_timestamp || 0;
     startedAt = callData.start_timestamp ? new Date(callData.start_timestamp * 1000) : new Date();
 
     console.log(`📞 Call ID: ${callId}`);
-    console.log(`🎙️ Job Role: ${jobRole}`);
-    console.log(`📝 Transcript length: ${transcript.length} chars`);
-    console.log(`⏱️ Duration: ${duration}s`);
+    console.log(`📝 Transcript length: ${transcript.length}`);
+    console.log(`⏱️ Duration: ${duration} seconds`);
 
-    // Validate transcript
-    if (!transcript || transcript.trim().length < 10) {
-      console.warn("⚠️ Transcript missing or too short, skipping feedback");
-      return res.status(200).json({
-        received: true,
-        message: "Transcript too short, skipped"
-      });
+    // Handle short transcripts gracefully instead of skipping
+    let feedback = "No feedback generated.";
+
+    if (!transcript || transcript.trim().length < 5) {
+      console.warn("⚠️ Transcript very short. Generating fallback feedback.");
+      feedback = "The interview audio was too short or unclear to generate detailed feedback. Please ensure your microphone is working and try speaking in longer sentences.";
+      // Still save it so user sees *something*
+    } else {
+      console.log("🧠 Generating AI feedback...");
+      feedback = await generateFeedback(transcript, jobRole);
+      console.log(`📊 Transcript preview (first 200 chars): ${transcript.substring(0, 200)}...`);
+      console.log(`🎯 Feedback preview (first 200 chars): ${feedback.substring(0, 200)}...`);
     }
 
-    // Generate AI feedback
-    console.log("🧠 Generating AI feedback...");
-    const feedback = await generateFeedback(transcript, jobRole);
-    console.log("✅ Feedback generated successfully");
-    console.log(`📄 Feedback preview: ${feedback.substring(0, 200)}...`);
-
-    // Find existing interview by callId or create new one
+    // Save to Firestore
     const interviewsRef = db.collection("interviews");
     const existingQuery = await interviewsRef.where("callId", "==", callId).limit(1).get();
 
@@ -169,115 +233,90 @@ app.post("/retell/interview-complete", async (req, res) => {
     };
 
     if (!existingQuery.empty) {
-      // Update existing interview
       docRef = existingQuery.docs[0].ref;
+      // Preserve userId if it exists in the document
+      const existingData = existingQuery.docs[0].data();
+      if (existingData.userId) {
+        interviewData.userId = existingData.userId;
+      } else if (userId) {
+        interviewData.userId = userId; // Add userId if missing
+      }
+      console.log('📝 Updating interview with data:', JSON.stringify(interviewData, null, 2));
       await docRef.update(interviewData);
-      console.log(`✅ Updated existing interview in Firestore: ${docRef.id}`);
+      console.log(`✅ Updated existing interview: ${docRef.id}`);
+      console.log(`✅ Feedback saved (${feedback.length} chars): ${feedback.substring(0, 100)}...`);
+
+      // Verify the save by reading it back
+      const verifyDoc = await docRef.get();
+      const savedData = verifyDoc.data();
+      console.log(`🔍 VERIFICATION - Saved feedback exists: ${!!savedData.feedback}`);
+      console.log(`🔍 VERIFICATION - Saved userId: ${savedData.userId || 'MISSING!'}`);
+      console.log(`🔍 VERIFICATION - Saved status: ${savedData.status}`);
     } else {
-      // Create new interview
       interviewData.startedAt = startedAt;
       if (userId) interviewData.userId = userId;
-
+      console.log('📝 Creating new interview with data:', JSON.stringify(interviewData, null, 2));
       docRef = await interviewsRef.add(interviewData);
-      console.log(`✅ Created new interview in Firestore: ${docRef.id}`);
+      console.log(`✅ Created new interview: ${docRef.id}`);
+      console.log(`✅ Feedback saved (${feedback.length} chars): ${feedback.substring(0, 100)}...`);
     }
 
-    // Return success with data for testing
-    res.status(200).json({
-      received: true,
-      success: true,
-      message: "Interview processed successfully",
-      interviewId: docRef.id,
-      feedbackPreview: feedback.substring(0, 300)
-    });
+    return { success: true, interviewId: docRef.id, feedbackPreview: feedback.substring(0, 50) };
 
+  } catch (error) {
+    console.error("❌ Internal Processing Error:", error);
+    throw error;
+  }
+}
+
+app.post("/retell/interview-complete", async (req, res) => {
+  console.log("📩 Retell webhook received");
+  try {
+    const result = await processInterviewData(req.body);
+    res.status(200).json(result);
   } catch (err) {
-    console.error("❌ Webhook processing failed:", err.message);
-    console.error("Stack:", err.stack);
-
-    // Still return 200 to Retell to prevent retries
-    res.status(200).json({
-      received: true,
-      error: err.message
-    });
+    console.error("Webhook Error:", err);
+    res.status(200).json({ received: true, error: err.message }); // 200 to stop retries
   }
 });
-
-// ============================================
-// PROCESS INTERVIEW (Fetch from Retell + Generate Feedback)
-// ============================================
 
 app.post("/process-interview", async (req, res) => {
   try {
     const { callId, userId, jobRole } = req.body;
+    console.log(`📞 /process-interview called with:`, { callId, userId, jobRole });
 
     if (!callId) {
+      console.error('❌ Missing callId in request');
       return res.status(400).json({ error: "callId required" });
     }
 
-    console.log(`📞 Processing interview for callId: ${callId}`);
-    console.log(`👤 User ID: ${userId}`);
-    console.log(`💼 Job Role: ${jobRole}`);
+    console.log(`📞 Manual processing for: ${callId}`);
 
-    // Add a small delay to allow Retell to process the transcript
-    console.log('⏳ Waiting 3 seconds for Retell to process transcript...');
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Wait for Retell (reduced from 3s to 1.5s for faster feedback)
+    await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // Fetch transcript from Retell
-    console.log('🔄 Fetching transcript from Retell...');
     const retellResponse = await axios.get(
       `https://api.retellai.com/v2/get-call/${callId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${RETELL_API_KEY}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${RETELL_API_KEY}` } }
     );
 
-    console.log('📦 Retell Response Status:', retellResponse.status);
-    const transcript = retellResponse.data.transcript || retellResponse.data.transcript_text;
+    const callData = retellResponse.data;
 
-    if (!transcript || transcript.trim().length < 10) {
-      console.warn('⚠️ Transcript too short or unavailable');
-      console.log('Transcript length:', transcript ? transcript.length : 0);
-      return res.json({
-        success: false,
-        message: "Transcript too short or unavailable"
-      });
-    }
-
-    console.log(`✅ Transcript fetched successfully (${transcript.length} chars)`);
-    const duration = retellResponse.data.duration_ms ? Math.round(retellResponse.data.duration_ms / 1000) : (retellResponse.data.call_duration || 0);
-    console.log(`⏱️ Duration from Retell: ${duration}s`);
-
-    // Trigger webhook processing
-    const webhookPayload = {
-      transcript,
-      callId,
+    // Merge with manual data
+    const payload = {
+      ...callData,
       userId,
-      duration,
-      jobRole: jobRole || "Frontend Developer",
+      jobRole: jobRole || callData.retell_llm_dynamic_variables?.job_role
     };
 
-    console.log('🔄 Triggering internal webhook processing...');
-    // Process via webhook internally
-    const webhookResponse = await axios.post(
-      `${BACKEND_URL}/retell/interview-complete`,
-      webhookPayload
-    );
+    // Call internally directly
+    const result = await processInterviewData(payload);
 
-    console.log('✅ Webhook processing completed:', webhookResponse.data);
-
-    res.json({
-      success: true,
-      message: "Interview processing started",
-      interviewId: webhookResponse.data.interviewId
-    });
+    res.json({ success: true, message: "Processed successfully", interviewId: result.interviewId });
 
   } catch (err) {
-    console.error("❌ Process interview error:", err.message);
-    console.error("Error details:", err.response?.data || err);
-    res.status(500).json({ error: "Failed to process interview", details: err.message });
+    console.error("Process Error:", err.message);
+    res.status(500).json({ error: "Failed to process", details: err.message });
   }
 });
 
@@ -317,55 +356,41 @@ app.get("/interviews/latest", async (req, res) => {
 // ============================================
 
 async function generateFeedback(transcript, jobRole) {
-  const prompt = `
-You are a professional interviewer.
+  // Truncate transcript to prevent context window overflow (approx 15k chars)
+  const safeTranscript = transcript.length > 15000
+    ? transcript.substring(0, 15000) + "...(truncated)"
+    : transcript;
 
-Evaluate the completed interview for the role of ${jobRole}.
-
-Provide:
-- Strengths
-- Weaknesses
-- Communication
-- Problem-solving
-- Areas to improve
-- Practical suggestions
-- Overall summary
-- Final score out of 10
+  // Streamlined prompt for faster generation
+  const prompt = `Evaluate this ${jobRole} interview. Provide:
+1. Overall Score (X/10)
+2. Key Strengths (2-3 bullet points)
+3. Areas to Improve (2-3 bullet points)
+4. Brief Summary (2-3 sentences)
 
 Transcript:
-${transcript}
-`;
+${safeTranscript}`;
 
-  const response = await axios.post(
-    "https://openrouter.ai/api/v1/chat/completions",
-    {
-      model: "tngtech/deepseek-r1t2-chimera:free",
-      temperature: 0.7,
-      max_tokens: 600,
+  try {
+    console.log('🧠 Generating feedback with Groq...');
+
+    const chatCompletion = await groq.chat.completions.create({
       messages: [
-        { role: "system", content: "You are an interview evaluator." },
+        { role: "system", content: "You are a concise interview evaluator." },
         { role: "user", content: prompt },
       ],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
-    }
-  );
+      model: "llama-3.3-70b-versatile", // Fast, high-quality Groq model
+      temperature: 0.7,
+      max_tokens: 500,
+    });
 
-  // Log the full response for debugging
-  console.log('OpenRouter Feedback Response Status:', response.status);
-  // console.log('OpenRouter Feedback Response Data:', JSON.stringify(response.data, null, 2)); // Optional: uncomment if needed
+    console.log('✅ Groq feedback generated successfully');
+    return chatCompletion.choices[0]?.message?.content || "Feedback generation failed.";
 
-  if (!response.data || !response.data.choices || !response.data.choices.length) {
-    console.error('❌ Unexpected OpenRouter feedback response structure:', response.data);
+  } catch (error) {
+    console.error('❌ Groq API Error:', error.message);
     return "Feedback generation failed due to AI provider error.";
   }
-
-  return response.data.choices[0].message.content;
 }
 
 // ============================================

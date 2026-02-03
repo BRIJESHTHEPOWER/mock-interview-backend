@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Chatbot API</title>
+</head>
+<body>
+    <h1>Test Chatbot API</h1>
+    <button onclick="testAPI()">Test Chatbot</button>
+    <div id="result"></div>
+
+    <script>
+        async function testAPI() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = 'Testing...';
+            
+            try {
+                const response = await fetch('http://localhost:5000/api/chatbot/message', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: 'Hello, test message',
+                        conversationHistory: []
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `<h2>✅ Success!</h2><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                } else {
+                    resultDiv.innerHTML = `<h2>❌ Error (${response.status})</h2><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<h2>❌ Network Error</h2><pre>${error.message}</pre>`;
+            }
+        }
+    </script>
+</body>
+</html>
