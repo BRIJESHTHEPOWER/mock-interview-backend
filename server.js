@@ -396,15 +396,36 @@ app.post("/process-interview", async (req, res) => {
 
     console.log(`📞 Manual processing for: ${callId}`);
 
-    // Wait for Retell (reduced from 3s to 1.5s for faster feedback)
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Wait longer for Retell to process (3s for better reliability on Render)
+    console.log('⏳ Waiting 3 seconds for Retell to process transcript...');
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
-    const retellResponse = await axios.get(
-      `https://api.retellai.com/v2/get-call/${callId}`,
-      { headers: { Authorization: `Bearer ${RETELL_API_KEY}` } }
-    );
+    // Retry logic for fetching call data
+    let callData;
+    let retries = 3;
 
-    const callData = retellResponse.data;
+    for (let i = 0; i < retries; i++) {
+      try {
+        console.log(`🔄 Attempt ${i + 1}/${retries} to fetch call data...`);
+        const retellResponse = await axios.get(
+          `https://api.retellai.com/v2/get-call/${callId}`,
+          {
+            headers: { Authorization: `Bearer ${RETELL_API_KEY}` },
+            timeout: 15000 // 15 second timeout
+          }
+        );
+        callData = retellResponse.data;
+        console.log('✅ Call data fetched successfully');
+        break;
+      } catch (err) {
+        console.error(`❌ Attempt ${i + 1} failed:`, err.message);
+        if (i === retries - 1) {
+          throw new Error('Failed to fetch call data from Retell after 3 attempts');
+        }
+        // Wait 2 seconds before retry
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
 
     // Merge with manual data
     const payload = {
@@ -477,6 +498,7 @@ ${safeTranscript}`;
 
   try {
     console.log('🧠 Generating feedback with Groq...');
+    console.log(`📊 Transcript length: ${safeTranscript.length} chars`);
 
     const chatCompletion = await groq.chat.completions.create({
       messages: [
@@ -486,14 +508,39 @@ ${safeTranscript}`;
       model: "llama-3.3-70b-versatile", // Fast, high-quality Groq model
       temperature: 0.7,
       max_tokens: 500,
+      timeout: 30000, // 30 second timeout
     });
 
+    const feedback = chatCompletion.choices[0]?.message?.content;
+
+    if (!feedback || feedback.trim().length === 0) {
+      throw new Error('Empty feedback received from Groq');
+    }
+
     console.log('✅ Groq feedback generated successfully');
-    return chatCompletion.choices[0]?.message?.content || "Feedback generation failed.";
+    console.log(`📝 Feedback length: ${feedback.length} chars`);
+    return feedback;
 
   } catch (error) {
     console.error('❌ Groq API Error:', error.message);
-    return "Feedback generation failed due to AI provider error.";
+    console.error('Error details:', {
+      name: error.name,
+      code: error.code,
+      status: error.status
+    });
+
+    // Return fallback feedback instead of failing completely
+    return `Interview Feedback for ${jobRole}:
+
+We encountered an issue generating detailed AI feedback. However, your interview was recorded successfully.
+
+Transcript Summary:
+- Interview duration: ${Math.round(safeTranscript.length / 100)} minutes (estimated)
+- Topics discussed: ${jobRole} related questions
+
+Please try again or contact support if this issue persists.
+
+Note: This is a fallback message due to AI service unavailability.`;
   }
 }
 
