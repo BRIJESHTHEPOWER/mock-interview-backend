@@ -71,12 +71,101 @@ app.post("/create-interview", async (req, res) => {
     const { jobRole } = req.body;
     if (!jobRole) return res.status(400).json({ error: "jobRole required" });
 
-    // ✅ REMOVED metadata field - this was causing the decoder error
+    console.log(`🎯 Creating interview for role: ${jobRole}`);
+
+    // Create a custom agent with role-specific prompt
+    // Optimized prompt for better flow and less breaking
+    const agentPrompt = `You are a professional AI interviewer for a ${jobRole} position.
+
+INTERVIEW STRUCTURE:
+1. Brief greeting and ask about their background (1-2 sentences)
+2. Ask 3-4 technical questions about ${jobRole}
+3. Ask 1-2 behavioral questions
+4. Thank them and end the interview
+
+SPEAKING STYLE:
+- Keep responses SHORT (1-2 sentences max)
+- Speak naturally and conversationally
+- Don't rush - pause between questions
+- Acknowledge answers briefly before next question
+- Use simple, clear language
+
+TECHNICAL QUESTIONS FOR ${jobRole}:
+- Focus on core concepts and practical experience
+- Ask one question at a time
+- Wait for complete answers
+
+IMPORTANT:
+- Speak slowly and clearly
+- Keep your responses concise
+- Don't interrupt the candidate
+- Maintain a professional but friendly tone`;
+
+    let customAgentId;
+
+    try {
+      // Create a custom agent for this interview with optimized settings
+      const agentResponse = await axios.post(
+        "https://api.retellai.com/v2/create-agent",
+        {
+          agent_name: `${jobRole} Interviewer - ${Date.now()}`,
+          language: "en-US",
+          voice_id: "openai-Alloy", // Changed to OpenAI voice for better stability
+          voice_temperature: 0.7, // Moderate variation for natural speech
+          voice_speed: 0.95, // Slightly slower for clarity
+          response_engine: {
+            type: "retell-llm",
+            llm_id: "gpt-4o-mini",
+            begin_message: `Hello! Thanks for joining. I'm conducting the ${jobRole} interview today. To start, could you briefly tell me about your background?`,
+            general_prompt: agentPrompt,
+            general_tools: [],
+            states: [],
+            // Optimized for better conversation flow
+            max_call_duration_ms: 600000, // 10 minutes max
+          },
+          // Audio optimization settings
+          enable_backchannel: false, // Disable to prevent interruptions
+          ambient_sound: "off", // Remove background noise
+          ambient_sound_volume: 0,
+          responsiveness: 0.5, // Lower = waits longer before responding (less breaking)
+          interruption_sensitivity: 0.3, // Lower = harder to interrupt (more stable)
+          // Boosted volume settings
+          normalize_for_speech: true,
+          opt_out_sensitive_data_storage: false,
+          // Pronunciation and speech settings
+          pronunciation_dictionary: [],
+          reminder_trigger_ms: 10000, // Remind if user silent for 10s
+          reminder_max_count: 2,
+          // End call settings
+          end_call_after_silence_ms: 30000, // End after 30s of silence
+          // Webhook settings (optional)
+          post_call_analysis_data: []
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${RETELL_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      customAgentId = agentResponse.data.agent_id;
+      console.log(`✅ Created custom agent: ${customAgentId}`);
+    } catch (agentErr) {
+      console.error("⚠️ Failed to create custom agent, falling back to default:", agentErr.response?.data || agentErr.message);
+      // Fallback to default agent with dynamic variables
+      customAgentId = RETELL_AGENT_ID;
+    }
+
+    // Create web call with the custom agent
     const response = await axios.post(
       "https://api.retellai.com/v2/create-web-call",
       {
-        agent_id: RETELL_AGENT_ID,
+        agent_id: customAgentId,
         retell_llm_dynamic_variables: { job_role: jobRole },
+        // Audio quality settings for web call
+        sample_rate: 24000, // Higher sample rate for better quality
+        enable_update: true,
       },
       {
         headers: {
@@ -86,23 +175,16 @@ app.post("/create-interview", async (req, res) => {
       }
     );
 
-    // [NEW] Save initial interview state to Firestore to track "Live" status
-    const callId = response.data.call_id;
-    await db.collection("interviews").add({
-      callId: callId,
-      jobRole: jobRole,
-      userId: req.body.userId, // Save userId from request
-      status: "started", // Marks it as live
-      createdAt: new Date(),
-    });
+    console.log(`✅ Web call created: ${response.data.call_id}`);
 
     res.json({
       success: true,
       callId: response.data.call_id,
       accessToken: response.data.access_token,
+      agentId: customAgentId
     });
   } catch (err) {
-    console.error("❌ Create interview error:", err.message);
+    console.error("❌ Create interview error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to create interview" });
   }
 });
@@ -228,9 +310,22 @@ async function processInterviewData(payload) {
       feedback,
       callId,
       status: 'completed',
-      duration,
       endedAt: new Date(),
     };
+
+    // Only set duration if it wasn't already set by the frontend
+    // The frontend calculates it accurately, so we preserve it
+    if (!existingQuery.empty) {
+      const existingData = existingQuery.docs[0].data();
+      if (!existingData.duration || existingData.duration === 0) {
+        // Only use backend duration if frontend didn't set it
+        interviewData.duration = duration;
+      }
+      // Otherwise, preserve the frontend's duration (don't overwrite)
+    } else {
+      // New document, use backend duration
+      interviewData.duration = duration;
+    }
 
     if (!existingQuery.empty) {
       docRef = existingQuery.docs[0].ref;
@@ -250,8 +345,17 @@ async function processInterviewData(payload) {
       const verifyDoc = await docRef.get();
       const savedData = verifyDoc.data();
       console.log(`🔍 VERIFICATION - Saved feedback exists: ${!!savedData.feedback}`);
+      console.log(`🔍 VERIFICATION - Saved feedback length: ${savedData.feedback?.length || 0}`);
       console.log(`🔍 VERIFICATION - Saved userId: ${savedData.userId || 'MISSING!'}`);
       console.log(`🔍 VERIFICATION - Saved status: ${savedData.status}`);
+      console.log(`🔍 VERIFICATION - Document ID: ${docRef.id}`);
+
+      if (savedData.status !== 'completed') {
+        console.error(`❌ ERROR: Status was not set to 'completed'! Current status: ${savedData.status}`);
+      }
+      if (!savedData.feedback) {
+        console.error(`❌ ERROR: Feedback was not saved to Firestore!`);
+      }
     } else {
       interviewData.startedAt = startedAt;
       if (userId) interviewData.userId = userId;
