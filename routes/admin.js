@@ -119,12 +119,17 @@ router.get('/users', checkAdmin, async (req, res) => {
 router.get('/interviews', checkAdmin, async (req, res) => {
     try {
         const snapshot = await db.collection('interviews').get();
-        let interviews = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-            // Ensure dates are parsed if they are timestamps
-            createdAt: doc.data().createdAt?.toDate ? doc.data().createdAt.toDate() : doc.data().createdAt
-        }));
+        let interviews = snapshot.docs.map(doc => {
+            const data = doc.data();
+            const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt;
+            const startedAt = data.startedAt?.toDate ? data.startedAt.toDate() : data.startedAt;
+            return {
+                id: doc.id,
+                ...data,
+                createdAt: createdAt || startedAt,
+                startedAt: startedAt || createdAt
+            };
+        });
 
         interviews.sort((a, b) => {
             const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
