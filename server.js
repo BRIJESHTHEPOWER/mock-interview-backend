@@ -73,98 +73,123 @@ app.post("/create-interview", async (req, res) => {
 
     console.log(`🎯 Creating interview for role: ${jobRole}`);
 
-    // Create a custom agent with role-specific prompt
-    // Optimized prompt for better flow and less breaking
-    const agentPrompt = `You are a professional AI interviewer for a ${jobRole} position.
+    // ─── Step 1: Create a Retell LLM with job-specific prompt ──────────────
+    // In Retell API v2 the LLM (prompt/instructions) is a separate resource.
+    // We must create it first, then attach it to an agent.
+    const agentPrompt = `You are a professional AI interviewer conducting a ${jobRole} interview.
+
+IMPORTANT — INTERVIEW TYPE:
+- This is a ${jobRole} interview. Always remember this.
+- If the candidate asks "which interview is this?", "what kind of interview is this?", "what role is this interview for?", or any similar question, always clearly answer: "This is a ${jobRole} interview."
+- Always introduce yourself as the AI interviewer for the "${jobRole}" position at the very beginning.
 
 INTERVIEW STRUCTURE:
-1. Brief greeting and ask about their background (1-2 sentences)
-2. Ask 3-4 technical questions about ${jobRole}
-3. Ask 1-2 behavioral questions
-4. Thank them and end the interview
+1. Start with: "Welcome! This is your ${jobRole} interview. I'll be your AI interviewer today." Then ask the candidate to briefly introduce themselves.
+2. Ask 3-4 technical questions specifically for a ${jobRole} role.
+3. Ask 1-2 behavioral / situational questions.
+4. Wrap up by thanking the candidate and ending politely.
 
-SPEAKING STYLE:
-- Keep responses SHORT (1-2 sentences max)
-- Speak naturally and conversationally
-- Don't rush - pause between questions
-- Acknowledge answers briefly before next question
-- Use simple, clear language
+SPEAKING RULES:
+- Keep every response SHORT (1-3 sentences max).
+- Only ask ONE question at a time — wait for the full answer before continuing.
+- Acknowledge answers briefly ("Great, thank you." / "Interesting.") before moving on.
+- Speak clearly and at a moderate pace.
+- Do NOT repeat yourself.
+- Do NOT give away answers or hints.
+- If asked what interview is going on, ALWAYS say it is a "${jobRole}" interview.
 
-TECHNICAL QUESTIONS FOR ${jobRole}:
-- Focus on core concepts and practical experience
-- Ask one question at a time
-- Wait for complete answers
+TECHNICAL AREAS TO COVER FOR ${jobRole}:
+- Core concepts and fundamentals specific to the ${jobRole} field.
+- Practical, real-world scenarios and problem-solving.
+- Tools, frameworks, and best practices used in ${jobRole} roles.
 
-IMPORTANT:
-- Speak slowly and clearly
-- Keep your responses concise
-- Don't interrupt the candidate
-- Maintain a professional but friendly tone`;
+END THE INTERVIEW after completing the structure above. Thank the candidate professionally.`;
 
-    let customAgentId;
+    let customAgentId = RETELL_AGENT_ID; // fallback
 
     try {
-      // Create a custom agent for this interview with optimized settings
-      const agentResponse = await axios.post(
-        "https://api.retellai.com/v2/create-agent",
+      // Step 1a: Create the Retell LLM (prompt engine)
+      console.log("📝 Creating Retell LLM with job-specific prompt...");
+      const llmResponse = await axios.post(
+        "https://api.retellai.com/v2/create-retell-llm",
         {
-          agent_name: `${jobRole} Interviewer - ${Date.now()}`,
-          language: "en-US",
-          voice_id: "openai-Alloy", // Changed to OpenAI voice for better stability
-          voice_temperature: 0.7, // Moderate variation for natural speech
-          voice_speed: 0.95, // Slightly slower for clarity
-          response_engine: {
-            type: "retell-llm",
-            llm_id: "gpt-4o-mini",
-            begin_message: `Hello! Thanks for joining. I'm conducting the ${jobRole} interview today. To start, could you briefly tell me about your background?`,
-            general_prompt: agentPrompt,
-            general_tools: [],
-            states: [],
-            // Optimized for better conversation flow
-            max_call_duration_ms: 600000, // 10 minutes max
-          },
-          // Audio optimization settings
-          enable_backchannel: false, // Disable to prevent interruptions
-          ambient_sound: "off", // Remove background noise
-          ambient_sound_volume: 0,
-          responsiveness: 0.5, // Lower = waits longer before responding (less breaking)
-          interruption_sensitivity: 0.3, // Lower = harder to interrupt (more stable)
-          // Boosted volume settings
-          normalize_for_speech: true,
-          opt_out_sensitive_data_storage: false,
-          // Pronunciation and speech settings
-          pronunciation_dictionary: [],
-          reminder_trigger_ms: 10000, // Remind if user silent for 10s
-          reminder_max_count: 2,
-          // End call settings
-          end_call_after_silence_ms: 30000, // End after 30s of silence
-          // Webhook settings (optional)
-          post_call_analysis_data: []
+          model: "gpt-4o-mini",
+          general_prompt: agentPrompt,
+          begin_message: `Hello! Welcome. This is your ${jobRole} interview. I'm your AI interviewer today. To get us started, could you please give me a brief introduction about yourself and your background in ${jobRole}?`,
+          general_tools: [],
+          states: [],
         },
         {
           headers: {
             Authorization: `Bearer ${RETELL_API_KEY}`,
             "Content-Type": "application/json",
           },
+          timeout: 20000,
+        }
+      );
+
+      const llmId = llmResponse.data.llm_id;
+      console.log(`✅ Created Retell LLM: ${llmId}`);
+
+      // Step 1b: Create the Agent referencing the LLM
+      console.log("🤖 Creating Retell Agent...");
+      const agentResponse = await axios.post(
+        "https://api.retellai.com/v2/create-agent",
+        {
+          agent_name: `${jobRole} Interviewer`,
+          voice_id: "openai-Alloy",
+          language: "en-US",
+          response_engine: {
+            type: "retell-llm",
+            llm_id: llmId,
+          },
+          // Conversation behaviour
+          responsiveness: 0.5,
+          interruption_sensitivity: 0.3,
+          enable_backchannel: false,
+          // Audio
+          normalize_for_speech: true,
+          voice_speed: 0.95,
+          voice_temperature: 0.7,
+          // Timing
+          reminder_trigger_ms: 10000,
+          reminder_max_count: 2,
+          end_call_after_silence_ms: 30000,
+          max_call_duration_ms: 600000,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${RETELL_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 20000,
         }
       );
 
       customAgentId = agentResponse.data.agent_id;
       console.log(`✅ Created custom agent: ${customAgentId}`);
+
     } catch (agentErr) {
-      console.error("⚠️ Failed to create custom agent, falling back to default:", agentErr.response?.data || agentErr.message);
-      // Fallback to default agent with dynamic variables
+      console.error(
+        "⚠️ Failed to create custom agent — falling back to default agent:",
+        agentErr.response?.data || agentErr.message
+      );
+      // Fallback to generic agent; job role is still passed as dynamic variable below
       customAgentId = RETELL_AGENT_ID;
     }
 
-    // Create web call with the custom agent
+    // ─── Step 2: Create the web call ───────────────────────────────────────
     const response = await axios.post(
       "https://api.retellai.com/v2/create-web-call",
       {
         agent_id: customAgentId,
-        retell_llm_dynamic_variables: { job_role: jobRole },
-        // Audio quality settings for web call
-        sample_rate: 24000, // Higher sample rate for better quality
+        // Pass jobRole as a dynamic variable so the default agent
+        // can also reference it if needed. Provide both formats to be safe.
+        retell_llm_dynamic_variables: { 
+            job_role: jobRole,
+            jobRole: jobRole
+        },
+        sample_rate: 24000,
         enable_update: true,
       },
       {
@@ -172,6 +197,7 @@ IMPORTANT:
           Authorization: `Bearer ${RETELL_API_KEY}`,
           "Content-Type": "application/json",
         },
+        timeout: 20000,
       }
     );
 
@@ -181,8 +207,9 @@ IMPORTANT:
       success: true,
       callId: response.data.call_id,
       accessToken: response.data.access_token,
-      agentId: customAgentId
+      agentId: customAgentId,
     });
+
   } catch (err) {
     console.error("❌ Create interview error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to create interview" });
@@ -192,11 +219,6 @@ IMPORTANT:
 // ============================================
 // CHATBOT API ROUTE
 // ============================================
-
-// ============================================
-// CHATBOT API ROUTE
-// ============================================
-
 const chatbotRouter = require('./routes/chatbot');
 app.use('/api/chatbot', chatbotRouter);
 
@@ -507,8 +529,7 @@ ${safeTranscript}`;
       ],
       model: "llama-3.3-70b-versatile", // Fast, high-quality Groq model
       temperature: 0.7,
-      max_tokens: 500,
-      timeout: 30000, // 30 second timeout
+      max_tokens: 500
     });
 
     const feedback = chatCompletion.choices[0]?.message?.content;

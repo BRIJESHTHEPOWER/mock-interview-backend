@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db, auth } = require('../firebase');
 const nodemailer = require('nodemailer');
+const axios = require('axios');
 
 // Middleware to check if user is admin
 // For this MVP, we will check if the user's email is in a hardcoded list or a specific collection
@@ -49,9 +50,9 @@ const checkAdmin = async (req, res, next) => {
 // ==========================================
 router.get('/stats', checkAdmin, async (req, res) => {
     try {
-        // 1. Get Live Interviews (Status = 'started')
-        // We need to update existing interviews to have 'started' status in the main flow.
-        const liveQuery = await db.collection('interviews').where('status', '==', 'started').get();
+        // 1. Get Live Interviews (Status = 'active')
+        // We need to update existing interviews to have 'active' status in the main flow.
+        const liveQuery = await db.collection('interviews').where('status', '==', 'active').get();
         const liveCount = liveQuery.size;
 
         // 2. Get Total Interviews
@@ -117,13 +118,20 @@ router.get('/users', checkAdmin, async (req, res) => {
 // ==========================================
 router.get('/interviews', checkAdmin, async (req, res) => {
     try {
-        const snapshot = await db.collection('interviews').orderBy('createdAt', 'desc').get();
-        const interviews = snapshot.docs.map(doc => ({
+        const snapshot = await db.collection('interviews').get();
+        let interviews = snapshot.docs.map(doc => ({
             id: doc.id,
             ...doc.data(),
             // Ensure dates are parsed if they are timestamps
             createdAt: doc.data().createdAt?.toDate ? doc.data().createdAt.toDate() : doc.data().createdAt
         }));
+
+        interviews.sort((a, b) => {
+            const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            return dateB - dateA;
+        });
+
         res.json({ interviews });
     } catch (error) {
         console.error("Fetch Interviews Error:", error);
@@ -132,9 +140,18 @@ router.get('/interviews', checkAdmin, async (req, res) => {
 });
 
 // ==========================================
-// CANCEL INTERVIEW
+// DELETE INTERVIEW (HARD DELETE)
 // ==========================================
-const axios = require('axios'); // Add axios import
+router.delete('/interviews/:id/delete', checkAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.collection('interviews').doc(id).delete();
+        res.json({ success: true, message: 'Interview deleted successfully' });
+    } catch (error) {
+        console.error("Delete Interview Error:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // ==========================================
 // CANCEL INTERVIEW
@@ -152,7 +169,7 @@ router.delete('/interviews/:id', checkAdmin, async (req, res) => {
         const interviewData = doc.data();
 
         // If interview is LIVE, terminate it via Retell API
-        if (interviewData.status === 'started' && interviewData.callId) {
+        if (interviewData.status === 'active' && interviewData.callId) {
             try {
                 // Call Retell API to terminate the call
                 // Assuming DELETE /v2/calls/{call_id} is the endpoint or similar
@@ -260,6 +277,20 @@ router.get('/feedback', checkAdmin, async (req, res) => {
         }));
         res.json({ feedback: feedbackList });
     } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ==========================================
+// DELETE FEEDBACK
+// ==========================================
+router.delete('/feedback/:id', checkAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.collection('platform_feedback').doc(id).delete();
+        res.json({ success: true, message: 'Feedback deleted successfully' });
+    } catch (error) {
+        console.error("Delete Feedback Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
