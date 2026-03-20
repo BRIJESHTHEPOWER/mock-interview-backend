@@ -1,16 +1,30 @@
-const admin = require("firebase-admin");
+// firebase.js
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    }),
-  });
+// Function to initialize Firebase
+function initFirebase() {
+    try {
+        // ... initialization code ...
+    } catch (error) {
+        console.error('Firebase initialization error:', error);
+        throw new Error('Failed to initialize Firebase.');
+    }
 }
 
-const db = admin.firestore();
-const auth = admin.auth();
+// Function to validate data before sending to Firebase
+function validateData(data) {
+    if (!data || typeof data !== 'object') {
+        console.error('Invalid data:', data);
+        throw new Error('Data must be a non-empty object.');
+    }
+    // Add further validation logic here
+}
 
-module.exports = { db, auth };
+// Example usage
+try {
+    const dataToSend = { /* ... */ };
+    validateData(dataToSend);
+    initFirebase();
+    // ... send data to Firebase ...
+} catch (error) {
+    console.error('Error during Firebase operations:', error);
+}
