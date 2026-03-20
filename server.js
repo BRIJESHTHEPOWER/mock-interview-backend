@@ -88,6 +88,8 @@ app.post("/create-interview", async (req, res) => {
     if (!jobRole) return res.status(400).json({ error: "jobRole required" });
 
     console.log(`🎯 Creating interview for role: ${jobRole}`);
+    console.log(`🔑 Agent ID: ${RETELL_AGENT_ID}`);
+    console.log(`🔑 API Key starts with: ${RETELL_API_KEY?.substring(0, 10)}...`);
 
     // Create the web call using the central RETELL_AGENT_ID and passing jobRole dynamically
     const response = await axios.post(
@@ -104,24 +106,11 @@ app.post("/create-interview", async (req, res) => {
           Authorization: `Bearer ${RETELL_API_KEY}`,
           "Content-Type": "application/json",
         },
-        timeout: 20000,
+        timeout: 30000,
       }
     );
 
     console.log(`✅ Web call created: ${response.data.call_id}`);
-
-    // Save to Firestore as 'active' (Fix from earlier)
-    const interviewData = {
-      jobRole,
-      callId: response.data.call_id,
-      userId: userId || 'anonymous',
-      status: 'active',
-      startedAt: new Date(),
-      createdAt: new Date()
-    };
-    await db.collection('interviews').add(interviewData);
-    
-    console.log(`✅ Saved active interview to DB`);
 
     res.json({
       success: true,
@@ -131,8 +120,18 @@ app.post("/create-interview", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Create interview error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to create interview" });
+    // Log full Retell error so we can see exactly what's wrong
+    const retellError = err.response?.data;
+    const statusCode = err.response?.status;
+    console.error(`❌ Create interview error (HTTP ${statusCode}):`);
+    console.error("Retell response:", JSON.stringify(retellError, null, 2));
+    console.error("Message:", err.message);
+    
+    res.status(500).json({ 
+      error: "Failed to create interview",
+      detail: retellError?.message || retellError?.error || err.message,
+      retellStatus: statusCode
+    });
   }
 });
 
