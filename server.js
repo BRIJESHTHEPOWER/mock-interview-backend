@@ -7,6 +7,8 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const Groq = require("groq-sdk");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 const { db } = require("./firebase");
 
@@ -32,8 +34,22 @@ if (!RETELL_API_KEY || !RETELL_AGENT_ID || !GROQ_API_KEY) {
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 // ============================================
-// MIDDLEWARE
+// MIDDLEWARE & SECURITY ENHANCEMENTS
 // ============================================
+
+// 1. Helmet helps secure Express apps by setting various HTTP headers
+app.use(helmet());
+
+// 2. Global Rate Limiting to prevent Overload/DDoS 
+// Allows max 100 requests per 15 minutes per IP
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, 
+  max: 100,
+  message: { error: "Too many requests from this IP, please try again after 15 minutes." },
+  standardHeaders: true, 
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
 
 app.use(cors({
   origin: [
@@ -68,129 +84,20 @@ app.get("/", (req, res) => {
 
 app.post("/create-interview", async (req, res) => {
   try {
-    const { jobRole } = req.body;
+    const { jobRole, userId } = req.body;
     if (!jobRole) return res.status(400).json({ error: "jobRole required" });
 
     console.log(`🎯 Creating interview for role: ${jobRole}`);
 
-    // ─── Step 1: Create a Retell LLM with job-specific prompt ──────────────
-    // In Retell API v2 the LLM (prompt/instructions) is a separate resource.
-    // We must create it first, then attach it to an agent.
-    const agentPrompt = `You are a professional AI interviewer conducting a ${jobRole} interview.
-
-IMPORTANT — INTERVIEW TYPE:
-- This is a ${jobRole} interview. Always remember this.
-- If the candidate asks "which interview is this?", "what kind of interview is this?", "what role is this interview for?", or any similar question, always clearly answer: "This is a ${jobRole} interview."
-- Always introduce yourself as the AI interviewer for the "${jobRole}" position at the very beginning.
-
-INTERVIEW STRUCTURE:
-1. Start with: "Welcome! This is your ${jobRole} interview. I'll be your AI interviewer today." Then ask the candidate to briefly introduce themselves.
-2. Ask 3-4 technical questions specifically for a ${jobRole} role.
-3. Ask 1-2 behavioral / situational questions.
-4. Wrap up by thanking the candidate and ending politely.
-
-SPEAKING RULES:
-- Keep every response SHORT (1-3 sentences max).
-- Only ask ONE question at a time — wait for the full answer before continuing.
-- Acknowledge answers briefly ("Great, thank you." / "Interesting.") before moving on.
-- Speak clearly and at a moderate pace.
-- Do NOT repeat yourself.
-- Do NOT give away answers or hints.
-- If asked what interview is going on, ALWAYS say it is a "${jobRole}" interview.
-
-TECHNICAL AREAS TO COVER FOR ${jobRole}:
-- Core concepts and fundamentals specific to the ${jobRole} field.
-- Practical, real-world scenarios and problem-solving.
-- Tools, frameworks, and best practices used in ${jobRole} roles.
-
-END THE INTERVIEW after completing the structure above. Thank the candidate professionally.`;
-
-    let customAgentId = RETELL_AGENT_ID; // fallback
-
-    try {
-      // Step 1a: Create the Retell LLM (prompt engine)
-      console.log("📝 Creating Retell LLM with job-specific prompt...");
-      const llmResponse = await axios.post(
-        "https://api.retellai.com/v2/create-retell-llm",
-        {
-          model: "gpt-4o-mini",
-          general_prompt: agentPrompt,
-          begin_message: `Hello! Welcome. This is your ${jobRole} interview. I'm your AI interviewer today. To get us started, could you please give me a brief introduction about yourself and your background in ${jobRole}?`,
-          general_tools: [],
-          states: [],
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${RETELL_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          timeout: 20000,
-        }
-      );
-
-      const llmId = llmResponse.data.llm_id;
-      console.log(`✅ Created Retell LLM: ${llmId}`);
-
-      // Step 1b: Create the Agent referencing the LLM
-      console.log("🤖 Creating Retell Agent...");
-      const agentResponse = await axios.post(
-        "https://api.retellai.com/v2/create-agent",
-        {
-          agent_name: `${jobRole} Interviewer`,
-          voice_id: "openai-Alloy",
-          language: "en-US",
-          response_engine: {
-            type: "retell-llm",
-            llm_id: llmId,
-          },
-          // Conversation behaviour
-          responsiveness: 0.5,
-          interruption_sensitivity: 0.3,
-          enable_backchannel: false,
-          // Audio
-          normalize_for_speech: true,
-          voice_speed: 0.95,
-          voice_temperature: 0.7,
-          // Timing
-          reminder_trigger_ms: 10000,
-          reminder_max_count: 2,
-          end_call_after_silence_ms: 30000,
-          max_call_duration_ms: 600000,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${RETELL_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          timeout: 20000,
-        }
-      );
-
-      customAgentId = agentResponse.data.agent_id;
-      console.log(`✅ Created custom agent: ${customAgentId}`);
-
-    } catch (agentErr) {
-      console.error(
-        "⚠️ Failed to create custom agent — falling back to default agent:",
-        agentErr.response?.data || agentErr.message
-      );
-      // Fallback to generic agent; job role is still passed as dynamic variable below
-      customAgentId = RETELL_AGENT_ID;
-    }
-
-    // ─── Step 2: Create the web call ───────────────────────────────────────
+    // Create the web call using the central RETELL_AGENT_ID and passing jobRole dynamically
     const response = await axios.post(
       "https://api.retellai.com/v2/create-web-call",
       {
-        agent_id: customAgentId,
-        // Pass jobRole as a dynamic variable so the default agent
-        // can also reference it if needed. Provide both formats to be safe.
+        agent_id: RETELL_AGENT_ID,
         retell_llm_dynamic_variables: { 
-            job_role: jobRole,
-            jobRole: jobRole
+            JOB_ROLE: jobRole
         },
-        sample_rate: 24000,
-        enable_update: true,
+        sample_rate: 24000
       },
       {
         headers: {
@@ -203,11 +110,24 @@ END THE INTERVIEW after completing the structure above. Thank the candidate prof
 
     console.log(`✅ Web call created: ${response.data.call_id}`);
 
+    // Save to Firestore as 'active' (Fix from earlier)
+    const interviewData = {
+      jobRole,
+      callId: response.data.call_id,
+      userId: userId || 'anonymous',
+      status: 'active',
+      startedAt: new Date(),
+      createdAt: new Date()
+    };
+    await db.collection('interviews').add(interviewData);
+    
+    console.log(`✅ Saved active interview to DB`);
+
     res.json({
       success: true,
       callId: response.data.call_id,
       accessToken: response.data.access_token,
-      agentId: customAgentId,
+      agentId: RETELL_AGENT_ID,
     });
 
   } catch (err) {
