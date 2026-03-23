@@ -37,6 +37,7 @@ try {
 }
 
 const db = admin.firestore();
+const auth = admin.auth();
 
-// Export the db instance for use in other files, like server.js
-module.exports = { db, admin };
+// Export the db and auth instances for use in other files, like server.js and routes/admin.js
+module.exports = { db, admin, auth };

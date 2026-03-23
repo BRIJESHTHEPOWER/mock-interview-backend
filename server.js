@@ -1,7 +1,4 @@
-// ============================================
-// VOICE-BASED AI MOCK INTERVIEW PLATFORM
-// FINAL PRODUCTION BACKEND (FIXED)
-// ============================================
+
 
 const express = require("express");
 const cors = require("cors");
@@ -13,9 +10,7 @@ const { db } = require("./firebase");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ============================================
-// ENV VALIDATION
-// ============================================
+
 
 const RETELL_API_KEY = process.env.RETELL_API_KEY;
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID;
@@ -643,7 +638,7 @@ app.get("/interviews/latest", async (req, res) => {
 });
 
 // ============================================
-// OPENROUTER FEEDBACK GENERATOR
+// GROQ FEEDBACK GENERATOR
 // ============================================
 
 async function generateFeedback(transcript, jobRole) {
